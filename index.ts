@@ -36,30 +36,46 @@ interface LocalLLMSettings {
   servers: LLMServer[];
 }
 
-// ─── settings.json persistence ────────────────────────────────────
+// ─── localllm.json persistence ────────────────────────────────────
+// Dedicated state file, kept out of pi's settings.json so the model list
+// never lands in the agent's own settings. `dir` defaults to the real
+// agent directory; the tests pass a temp one.
+const AGENT_DIR = path.join(os.homedir(), ".pi", "agent");
+const LEGACY_KEY = "localllm";
 
-const SETTINGS_FILE = path.join(os.homedir(), ".pi", "agent", "settings.json");
-const SETTINGS_KEY = "localllm";
-
-function readSettings(): LocalLLMSettings {
+export function readSettings(dir: string = AGENT_DIR): LocalLLMSettings {
   try {
-    if (!fs.existsSync(SETTINGS_FILE)) return { servers: [] };
-    const all = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")) as Record<string, unknown>;
-    return (all[SETTINGS_KEY] as LocalLLMSettings | undefined) ?? { servers: [] };
-  } catch {
-    return { servers: [] };
-  }
-}
-
-function writeSettings(settings: LocalLLMSettings): void {
-  let all: Record<string, unknown> = {};
-  try {
-    if (fs.existsSync(SETTINGS_FILE)) {
-      all = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8")) as Record<string, unknown>;
+    if (fs.existsSync(path.join(dir, "localllm.json"))) {
+      const parsed = JSON.parse(fs.readFileSync(path.join(dir, "localllm.json"), "utf8")) as LocalLLMSettings;
+      if (parsed && Array.isArray(parsed.servers)) return parsed;
     }
   } catch {}
-  all[SETTINGS_KEY] = settings;
-  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(all, null, 2), "utf8");
+  const migrated = migrateLegacySettings(dir);
+  return migrated ?? { servers: [] };
+}
+
+// One-time migration: pull the old key out of settings.json and delete it
+// so the model list stops being written back there.
+export function migrateLegacySettings(dir: string = AGENT_DIR): LocalLLMSettings | null {
+  const stateFile = path.join(dir, "localllm.json");
+  const legacyFile = path.join(dir, "settings.json");
+  try {
+    if (fs.existsSync(legacyFile)) {
+      const all = JSON.parse(fs.readFileSync(legacyFile, "utf8")) as Record<string, unknown>;
+      const legacy = all[LEGACY_KEY] as LocalLLMSettings | undefined;
+      if (legacy && Array.isArray(legacy.servers)) {
+        fs.writeFileSync(stateFile, JSON.stringify(legacy, null, 2), "utf8");
+        delete all[LEGACY_KEY];
+        fs.writeFileSync(legacyFile, JSON.stringify(all, null, 2), "utf8");
+        return legacy;
+      }
+    }
+  } catch {}
+  return null;
+}
+
+export function writeSettings(settings: LocalLLMSettings, dir: string = AGENT_DIR): void {
+  fs.writeFileSync(path.join(dir, "localllm.json"), JSON.stringify(settings, null, 2), "utf8");
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────
@@ -266,7 +282,7 @@ async function runWizard(
   if (os.platform() === "darwin" && isDirectApiKey(apiKey)) {
     const store = await ctx.ui.confirm(
       "Store API key in macOS Keychain?",
-      "Keeps the raw key out of settings.json — it'll be referenced via a !security command instead.",
+      "Keeps the raw key out of localllm.json — it'll be referenced via a !security command instead.",
     );
     if (store) {
       try {
@@ -275,7 +291,7 @@ async function runWizard(
         ctx.ui.notify("API key stored in Keychain.", "info");
       } catch (err: unknown) {
         ctx.ui.notify(
-          `Failed to store in Keychain, keeping key in settings.json: ${err instanceof Error ? err.message : String(err)}`,
+          `Failed to store in Keychain, keeping key in localllm.json: ${err instanceof Error ? err.message : String(err)}`,
           "warning",
         );
       }
@@ -326,7 +342,7 @@ async function runWizard(
 // ─── Manual capability override ────────────────────────────────────
 // Some backends can't be asked whether a model supports vision/reasoning
 // (see detect.ts's vLLM note) — this lets a user fix the tags by hand from
-// the TUI instead of editing settings.json directly. Like any hand edit,
+// the TUI instead of editing localllm.json directly. Like any hand edit,
 // it sticks until the next ↺ Refresh overwrites it with fresh detected
 // values.
 

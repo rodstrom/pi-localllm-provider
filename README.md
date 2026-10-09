@@ -2,7 +2,7 @@
 
 A Pi extension for wizard-based setup of local LLM servers — MTPLX, oMLX, LM Studio, llama.cpp, Ollama, vLLM, SGLang, ds4, ninfer, or anything else with an OpenAI-compatible API.
 
-- **One command, one place** — `/localllm` is a single TUI menu for adding, inspecting, and managing every local server's integration with Pi — no subcommands, no hand-editing `settings.json`.
+- **One command, one place** — `/localllm` is a single TUI menu for adding, inspecting, and managing every local server's integration with Pi — no subcommands, no hand-editing `localllm.json`.
 - **Reads the server, doesn't guess** — context window, reasoning, vision, size, quantization: pulled from each backend's own API by a detector written for it, and probed directly where a backend publishes nothing, not typed into a config file and hoped correct.
 
 ## Quick start
@@ -32,7 +32,7 @@ LocalLLM — 2 server(s)
   ＋ Add server
 ```
 
-Selecting a server opens its sub-menu with detected metadata per model — no need to open `settings.json`:
+Selecting a server opens its sub-menu with detected metadata per model — no need to open `localllm.json`:
 
 ```
 Mac Studio  [oMLX]
@@ -148,7 +148,7 @@ The tier sweep reuses the same endpoint, which makes it free where SGLang's cost
 
 vLLM's `/v1/models` never carries reasoning or vision data; its detector exists only to label the backend `[vLLM]` correctly, not to unlock extra metadata.
 
-**Known limitation — vLLM vision/reasoning.** Nothing in vLLM's public API says whether the served model supports images or reasoning, so both always come back `false`/text-only for `[vLLM]` servers, even for VLMs. (vLLM does have an internal `/server_info` debug endpoint that carries this, gated behind a `VLLM_SERVER_DEV_MODE=1` env var — but it's undocumented, dumps your full server config on request, and its system-info collection is known to crash on some setups, so this extension deliberately doesn't probe it.) If a tag is wrong for your model, use **✎ Edit model capabilities** in the server's sub-menu to flip vision/reasoning by hand — same effect as editing `settings.json` directly, just without leaving Pi. It survives until the next **↺ Refresh**, which overwrites it with whatever the server reports.
+**Known limitation — vLLM vision/reasoning.** Nothing in vLLM's public API says whether the served model supports images or reasoning, so both always come back `false`/text-only for `[vLLM]` servers, even for VLMs. (vLLM does have an internal `/server_info` debug endpoint that carries this, gated behind a `VLLM_SERVER_DEV_MODE=1` env var — but it's undocumented, dumps your full server config on request, and its system-info collection is known to crash on some setups, so this extension deliberately doesn't probe it.) If a tag is wrong for your model, use **✎ Edit model capabilities** in the server's sub-menu to flip vision/reasoning by hand — same effect as editing `localllm.json` directly, just without leaving Pi. It survives until the next **↺ Refresh**, which overwrites it with whatever the server reports.
 
 **ds4** ([antirez/ds4](https://github.com/antirez/ds4), "DwarfStar") serves nothing outside `/v1` — no `/health`, `/props` or `/version`, and no `Server` header — so it can't be probed the way the backends above are. It's identified instead by the one thing `ds4_server.c` hard-codes onto every model card, `"owned_by":"ds4.c"`, which the generic `/v1/models` request already fetches. Three things on those cards are read from ds4's source rather than taken at face value:
 
@@ -202,31 +202,29 @@ That leaves this mapping, with `minimal`/`low`/`medium`/`high` passing through u
 
 ## Configuration
 
-Stored under the `localllm` key in `~/.pi/agent/settings.json`:
+Stored in `~/.pi/agent/localllm.json` (a dedicated file, kept out of pi's `settings.json`; servers configured under the old `localllm` key in `settings.json` are migrated there automatically on first run):
 
 ```json
 {
-  "localllm": {
-    "servers": [
-      {
-        "id": "a3f7k2",
-        "name": "Mac Studio",
-        "baseUrl": "http://mac-studio.lan:8000/v1",
-        "apiKey": "",
-        "apiType": "omlx",
-        "models": [
-          {
-            "id": "Qwen/Qwen2.5-Coder-7B-Instruct",
-            "name": "Qwen2.5-Coder-7B-Instruct",
-            "contextWindow": 32768,
-            "maxTokens": 8192,
-            "reasoning": false,
-            "input": ["text"]
-          }
-        ]
-      }
-    ]
-  }
+  "servers": [
+    {
+      "id": "a3f7k2",
+      "name": "Mac Studio",
+      "baseUrl": "http://mac-studio.lan:8000/v1",
+      "apiKey": "",
+      "apiType": "omlx",
+      "models": [
+        {
+          "id": "Qwen/Qwen2.5-Coder-7B-Instruct",
+          "name": "Qwen2.5-Coder-7B-Instruct",
+          "contextWindow": 32768,
+          "maxTokens": 8192,
+          "reasoning": false,
+          "input": ["text"]
+        }
+      ]
+    }
+  ]
 }
 ```
 
