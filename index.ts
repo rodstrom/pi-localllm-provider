@@ -2,6 +2,8 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { exec } from "node:child_process";
+import { promisify } from "node:util";
 import {
   capTokens,
   detectModels,
@@ -104,6 +106,28 @@ export function migrateLegacySettings(dir: string = AGENT_DIR): LocalLLMSettings
 
 export function writeSettings(settings: LocalLLMSettings, dir: string = AGENT_DIR): void {
   fs.writeFileSync(path.join(dir, "localllm.json"), JSON.stringify(settings, null, 2), "utf8");
+}
+
+// ─── API key resolution ───────────────────────────────────────────
+// apiKey accepts Pi's non-literal forms ($VAR, ${VAR}, !command) so the
+// token can stay out of the config file. Pi resolves them for streaming, but
+// the discovery probes (Add / ↺ Refresh / ✎ Reconfigure) build their
+// Authorization header from the raw string, so they must resolve the
+// reference here first — otherwise it is sent verbatim as Bearer $VAR and
+// every probe 401s (upstream issue #5). Only the probe gets the resolved
+// value; the config keeps the reference.
+
+const execAsync = promisify(exec);
+
+export async function resolveApiKey(key: string): Promise<string> {
+  const trimmed = key.trim();
+  if (trimmed.startsWith("!")) {
+    const { stdout } = await execAsync(trimmed.slice(1), { timeout: 10_000 });
+    return stdout.trim();
+  }
+  const ref = trimmed.match(/^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/);
+  if (ref) return process.env[ref[1]] ?? "";
+  return trimmed;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────
@@ -393,7 +417,7 @@ async function runWizard(
   ctx.ui.notify(`Connecting to ${baseUrl} ...`, "info");
   let result: DetectResult;
   try {
-    result = await detectModels(baseUrl, apiKey, ctx.signal);
+    result = await detectModels(baseUrl, await resolveApiKey(apiKey), ctx.signal);
   } catch (err: unknown) {
     ctx.ui.notify(
       `Cannot reach server: ${err instanceof Error ? err.message : String(err)}`,
@@ -643,7 +667,7 @@ async function showServerMenu(
       ctx.ui.notify(`Refreshing ${server.name} ...`, "info");
       let result: DetectResult;
       try {
-        result = await detectModels(server.baseUrl, server.apiKey, ctx.signal);
+        result = await detectModels(server.baseUrl, await resolveApiKey(server.apiKey), ctx.signal);
       } catch (err: unknown) {
         ctx.ui.notify(
           `Failed: ${err instanceof Error ? err.message : String(err)}`,

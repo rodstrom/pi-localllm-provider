@@ -281,6 +281,8 @@ A related sharp edge: a reported size of `0` means "not reported", not a zero-by
 | macOS Keychain | offered automatically for a plain key — see below |
 | Empty | no auth |
 
+The discovery probes (＋ Add / ↺ Refresh / ✎ Reconfigure) resolve `$VAR` and `!command` forms the same way before sending, so every form works end-to-end — the config file keeps the reference, never the token.
+
 **macOS Keychain:** typing a plain key in the wizard offers to store it via `security add-generic-password` (using `execFile`, not a shell string, so the key can't be interpreted as shell syntax) and replaces `apiKey` with a `!security find-generic-password ...` reference — the raw key never touches disk. Keyed by the server's internal `id` (survives **✎ Reconfigure**), deleted on **✕ Remove**. A key already starting with `!` or `$` skips the prompt.
 
 Configured servers also show up in Pi's `/login` → **Use an API key**, if you'd rather use `auth.json` instead.

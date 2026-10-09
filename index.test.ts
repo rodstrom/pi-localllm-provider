@@ -14,6 +14,7 @@ import {
   modelsHeading,
   normalizeBaseUrl,
   readSettings,
+  resolveApiKey,
   writeSettings,
 } from "./index.ts";
 
@@ -443,6 +444,34 @@ describe("modelsHeading", () => {
   it("omits the legend when no model reports loaded state", () => {
     expect(modelsHeading([baseModel])).toBe("Models:");
     expect(modelsHeading([])).toBe("Models:");
+  });
+});
+
+describe("resolveApiKey", () => {
+  it("passes a plain key through, trimmed", async () => {
+    expect(await resolveApiKey("  abc123 ")).toBe("abc123");
+  });
+
+  it("resolves $VAR and ${VAR} references from the environment", async () => {
+    process.env.PI_TEST_LLM_KEY = "secret-value";
+    try {
+      expect(await resolveApiKey("$PI_TEST_LLM_KEY")).toBe("secret-value");
+      expect(await resolveApiKey("${PI_TEST_LLM_KEY}")).toBe("secret-value");
+    } finally {
+      delete process.env.PI_TEST_LLM_KEY;
+    }
+  });
+
+  it("resolves an unset reference to an empty key", async () => {
+    expect(await resolveApiKey("$SURELY_UNSET_LLM_KEY_1234")).toBe("");
+  });
+
+  it("leaves a $ inside a longer string alone", async () => {
+    expect(await resolveApiKey("abc$def")).toBe("abc$def");
+  });
+
+  it("runs a !command and uses its trimmed stdout", async () => {
+    expect(await resolveApiKey("!echo hello")).toBe("hello");
   });
 });
 
