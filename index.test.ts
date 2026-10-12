@@ -4,6 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   applyManualOverrides,
+  buildRegisteredModel,
+  effectiveCacheFormat,
   effectiveContextWindow,
   effectiveInput,
   effectiveMaxTokens,
@@ -12,6 +14,7 @@ import {
   formatModelLine,
   modelIdsChanged,
   modelsHeading,
+  nextBulkCachePreset,
   normalizeBaseUrl,
   readSettings,
   resolveApiKey,
@@ -328,6 +331,7 @@ describe("applyManualOverrides", () => {
       input: ["text"] as ("text" | "image")[],
     };
     const [out] = applyManualOverrides([stored], [detected]);
+    // "m1" is not Claude-family, so no cacheFormat field is stamped at all.
     expect(out).toEqual(detected);
   });
 
@@ -361,6 +365,69 @@ describe("applyManualOverrides", () => {
     expect(out[0].contextWindowOverride).toBe(131072);
     // "c" is new and "b" isn't served anymore — neither gets an override.
     expect(out[1].contextWindowOverride).toBeUndefined();
+  });
+
+  it("re-derives cacheFormat from the id and re-attaches cacheFormatOverride", () => {
+    const stored = {
+      id: "claude-sonnet-4-5",
+      name: "m",
+      contextWindow: 32768,
+      maxTokens: 8192,
+      reasoning: false,
+      cacheFormat: "anthropic" as const,
+      cacheFormatOverride: null,
+      input: ["text"] as ("text" | "image")[],
+    };
+    const detected = {
+      id: "claude-sonnet-4-5",
+      name: "m",
+      contextWindow: 65536,
+      maxTokens: 16384,
+      reasoning: false,
+      input: ["text"] as ("text" | "image")[],
+    };
+    const [out] = applyManualOverrides([stored], [detected]);
+    expect(out.cacheFormat).toBe("anthropic"); // re-detected from the id
+    // A stored null survives the round trip — it is NOT treated as "absent",
+    // so a forced-off model stays forced off after a refresh.
+    expect(out.cacheFormatOverride).toBeNull();
+  });
+
+  it("re-attaches an explicit anthropic override for a non-Claude id", () => {
+    const stored = {
+      id: "greenpt/deepseek-v4.1-flash",
+      name: "m",
+      contextWindow: 32768,
+      maxTokens: 8192,
+      reasoning: false,
+      cacheFormatOverride: "anthropic" as const,
+      input: ["text"] as ("text" | "image")[],
+    };
+    const detected = {
+      id: "greenpt/deepseek-v4.1-flash",
+      name: "m",
+      contextWindow: 32768,
+      maxTokens: 8192,
+      reasoning: false,
+      input: ["text"] as ("text" | "image")[],
+    };
+    const [out] = applyManualOverrides([stored], [detected]);
+    expect(out).not.toHaveProperty("cacheFormat"); // detection says no
+    expect(out.cacheFormatOverride).toBe("anthropic"); // but the manual decision survives
+  });
+
+  it("stamps cacheFormat on a detected model with no stored counterpart", () => {
+    const detected = {
+      id: "aws/claude-haiku-5-5-eu",
+      name: "m",
+      contextWindow: 32768,
+      maxTokens: 8192,
+      reasoning: false,
+      input: ["text"] as ("text" | "image")[],
+    };
+    const [out] = applyManualOverrides([], [detected]);
+    expect(out.cacheFormat).toBe("anthropic");
+    expect(out).not.toHaveProperty("cacheFormatOverride");
   });
 });
 
@@ -419,6 +486,116 @@ describe("effective values", () => {
     expect(effectiveTemperature(m)).toBe(0.2);
     expect(effectiveTemperature({ ...base, samplingParams: { temperature: 0.6 } })).toBe(0.6);
     expect(effectiveTemperature(base)).toBeUndefined();
+  });
+});
+
+describe("effectiveCacheFormat", () => {
+  const detected = {
+    id: "claude-sonnet-4-5",
+    name: "m",
+    contextWindow: 32768,
+    maxTokens: 8192,
+    reasoning: false,
+    cacheFormat: "anthropic" as const,
+    input: ["text"] as ("text" | "image")[],
+  };
+  const undetected = {
+    id: "greenpt/deepseek-v4.1-flash",
+    name: "m",
+    contextWindow: 32768,
+    maxTokens: 8192,
+    reasoning: false,
+    input: ["text"] as ("text" | "image")[],
+  };
+
+  it("follows the auto-detected value when there is no override", () => {
+    expect(effectiveCacheFormat(detected)).toBe(true);
+    expect(effectiveCacheFormat(undetected)).toBe(false);
+  });
+
+  // The point of null being a stored value rather than an absence: it must
+  // not fall through to detection — a forced "off" stays off.
+  it("a null override forces off even when detection says anthropic", () => {
+    expect(effectiveCacheFormat({ ...detected, cacheFormatOverride: null })).toBe(false);
+  });
+
+  it("an anthropic override forces on even when detection says nothing", () => {
+    expect(effectiveCacheFormat({ ...undetected, cacheFormatOverride: "anthropic" })).toBe(true);
+  });
+
+  it("treats a missing cacheFormat as no cache", () => {
+    const { cacheFormat: _drop, ...plain } = detected;
+    expect(effectiveCacheFormat(plain as typeof detected)).toBe(false);
+  });
+});
+
+describe("buildRegisteredModel", () => {
+  const base = {
+    id: "m1",
+    name: "m",
+    contextWindow: 32768,
+    maxTokens: 8192,
+    reasoning: false,
+    input: ["text"] as ("text" | "image")[],
+  };
+
+  it("stamps cacheControlFormat on a detected Claude model", () => {
+    const m = { ...base, id: "aws/claude-haiku-5-5-eu", cacheFormat: "anthropic" as const };
+    expect(buildRegisteredModel(m).compat.cacheControlFormat).toBe("anthropic");
+  });
+
+  it("never stamps a non-Claude model", () => {
+    const m = { ...base, id: "greenpt/deepseek-v4.1-flash" };
+    expect(buildRegisteredModel(m).compat).not.toHaveProperty("cacheControlFormat");
+  });
+
+  it("omits the field when the user overrides a Claude model off (null)", () => {
+    const m = { ...base, id: "claude-sonnet-4-5", cacheFormat: "anthropic" as const, cacheFormatOverride: null };
+    expect(buildRegisteredModel(m).compat).not.toHaveProperty("cacheControlFormat");
+  });
+
+  it("stamps it when the user overrides a non-Claude model on", () => {
+    const m = { ...base, id: "greenpt/deepseek-v4.1-flash", cacheFormatOverride: "anthropic" as const };
+    expect(buildRegisteredModel(m).compat.cacheControlFormat).toBe("anthropic");
+  });
+
+  it("keeps the existing compat flags untouched", () => {
+    const m = { ...base, id: "claude-sonnet-4-5", cacheFormat: "anthropic" as const, compat: { supportsReasoningEffort: true } };
+    expect(buildRegisteredModel(m).compat).toMatchObject({
+      supportsReasoningEffort: true,
+      supportsDeveloperRole: false,
+      cacheControlFormat: "anthropic",
+    });
+  });
+});
+
+describe("nextBulkCachePreset", () => {
+  const claude = (override?: "anthropic" | null) => ({
+    id: "claude-sonnet-4-5",
+    name: "m",
+    contextWindow: 32768,
+    maxTokens: 8192,
+    reasoning: false,
+    ...(override !== undefined ? { cacheFormatOverride: override } : {}),
+    input: ["text"] as ("text" | "image")[],
+  });
+
+  it("starts the cycle at on when every matching model is auto (no overrides)", () => {
+    expect(nextBulkCachePreset([claude(), claude()])).toBe("on");
+  });
+
+  it("moves to off once models are forced on (mixed auto/on converges to uniform off)", () => {
+    expect(nextBulkCachePreset([claude("anthropic"), claude()])).toBe("off");
+  });
+
+  it("moves to auto once models are forced off", () => {
+    expect(nextBulkCachePreset([claude(null), claude()])).toBe("auto");
+  });
+
+  it("ignores non-matching models when deciding the position", () => {
+    const deepseek = { id: "deepseek-v4", name: "d", contextWindow: 32768, maxTokens: 8192, reasoning: false, cacheFormatOverride: null, input: ["text"] as ("text" | "image")[] };
+    expect(nextBulkCachePreset([deepseek, claude()])).toBe("on"); // the forced-off belongs to a non-matching id
+    expect(nextBulkCachePreset([])).toBe("on"); // nothing matching: harmless no-op
   });
 });
 

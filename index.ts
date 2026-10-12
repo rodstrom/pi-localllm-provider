@@ -6,6 +6,7 @@ import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import {
   capTokens,
+  detectCacheFormat,
   detectModels,
   type ApiType,
   type DetectResult,
@@ -42,6 +43,13 @@ interface LLMModel {
   reasoningOverride?: boolean;
   visionOverride?: boolean;
   temperatureOverride?: number;
+  // "anthropic" when the id names a Claude-family model; absent otherwise
+  // (absent = no cache, not unknown). Re-derived on every refresh; the
+  // user's choice lives in cacheFormatOverride.
+  cacheFormat?: "anthropic";
+  // Manual flip the id heuristic can't classify. "anthropic" forces markers
+  // on, null forces them off, absent = auto (detection decides).
+  cacheFormatOverride?: "anthropic" | null;
   reasoning: boolean;
   input: ("text" | "image")[];
   // Not every backend can report these — undefined means "unknown", not "no".
@@ -189,6 +197,11 @@ export function effectiveInput(m: LLMModel): ("text" | "image")[] {
 export function effectiveTemperature(m: LLMModel): number | undefined {
   return m.temperatureOverride ?? m.samplingParams?.temperature;
 }
+export function effectiveCacheFormat(m: LLMModel): boolean {
+  // Deliberately not `??`: null means forced off, not fall-through to auto.
+  if (m.cacheFormatOverride !== undefined) return m.cacheFormatOverride === "anthropic";
+  return m.cacheFormat === "anthropic";
+}
 export function effectiveMaxTokens(m: LLMModel): number {
   if (m.maxTokensOverride !== undefined) return m.maxTokensOverride;
   return m.contextWindowOverride !== undefined
@@ -209,16 +222,22 @@ export function applyManualOverrides(
   detected: DiscoveredModel[],
 ): LLMModel[] {
   return detected.map((d) => {
+    // cacheFormat is re-derived from the id; only the override survives.
+    const base: LLMModel = {
+      ...d,
+      ...(detectCacheFormat(d.id) ? { cacheFormat: "anthropic" as const } : {}),
+    };
     const prev = from.find((e) => e.id === d.id);
-    if (!prev) return d;
+    if (!prev) return base;
     const overrides = {
       ...(prev.contextWindowOverride !== undefined ? { contextWindowOverride: prev.contextWindowOverride } : {}),
       ...(prev.maxTokensOverride !== undefined ? { maxTokensOverride: prev.maxTokensOverride } : {}),
       ...(prev.reasoningOverride !== undefined ? { reasoningOverride: prev.reasoningOverride } : {}),
       ...(prev.visionOverride !== undefined ? { visionOverride: prev.visionOverride } : {}),
       ...(prev.temperatureOverride !== undefined ? { temperatureOverride: prev.temperatureOverride } : {}),
+      ...(prev.cacheFormatOverride !== undefined ? { cacheFormatOverride: prev.cacheFormatOverride } : {}),
     };
-    return Object.keys(overrides).length > 0 ? { ...d, ...overrides } : d;
+    return Object.keys(overrides).length > 0 ? { ...base, ...overrides } : base;
   });
 }
 
@@ -282,13 +301,9 @@ export function formatModelLine(m: LLMModel): string {
 
 // ─── Provider registration ────────────────────────────────────────
 
-function registerServer(pi: ExtensionAPI, server: LLMServer): void {
-  pi.registerProvider(toProviderId(server), {
-    name: server.name,
-    baseUrl: server.baseUrl,
-    apiKey: server.apiKey || "no-key",
-    api: "openai-completions",
-    models: server.models.map((m) => ({
+// The model object handed to pi.registerProvider.
+export function buildRegisteredModel(m: LLMModel) {
+  return {
       id: m.id,
       name: m.name,
       reasoning: effectiveReasoning(m),
@@ -333,6 +348,10 @@ function registerServer(pi: ExtensionAPI, server: LLMServer): void {
       compat: {
         supportsReasoningEffort: m.compat?.supportsReasoningEffort ?? false,
         supportsDeveloperRole: m.compat?.supportsDeveloperRole ?? false,
+        // pi auto-detects cacheControlFormat only for its built-in openrouter
+        // provider, so a localllm gateway serving Claude models must declare
+        // it here; non-Anthropic backends can reject unknown marker keys.
+        ...(effectiveCacheFormat(m) ? { cacheControlFormat: "anthropic" as const } : {}),
       },
       ...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
       // Left off entirely when unset, so the server keeps applying whatever
@@ -340,7 +359,16 @@ function registerServer(pi: ExtensionAPI, server: LLMServer): void {
       ...(effectiveTemperature(m) !== undefined
         ? { samplingParams: { temperature: effectiveTemperature(m) } }
         : {}),
-    })),
+  };
+}
+
+function registerServer(pi: ExtensionAPI, server: LLMServer): void {
+  pi.registerProvider(toProviderId(server), {
+    name: server.name,
+    baseUrl: server.baseUrl,
+    apiKey: server.apiKey || "no-key",
+    api: "openai-completions",
+    models: server.models.map((m) => buildRegisteredModel(m)),
   });
 }
 
@@ -451,7 +479,7 @@ async function runWizard(
     baseUrl,
     apiKey,
     apiType: result.apiType,
-    models: selectedApiModels,
+    models: selectedApiModels.map((m) => (detectCacheFormat(m.id) ? { ...m, cacheFormat: "anthropic" as const } : m)),
   };
 }
 
@@ -514,8 +542,14 @@ async function editModelCapabilities(
     const temp = effectiveTemperature(current);
     const ctxManual = current.contextWindowOverride !== undefined;
     const maxManual = current.maxTokensOverride !== undefined;
+    // auto = detection decides, then forced on ("anthropic") / off (null).
+    const cacheManual = current.cacheFormatOverride !== undefined;
+    const cacheState = cacheManual
+      ? (current.cacheFormatOverride === "anthropic" ? "on" : "off")
+      : `auto(${effectiveCacheFormat(current) ? "on" : "off"})`;
     const OPT_VISION = `Vision: ${vision ? "on" : "off"}  (tap to turn ${vision ? "off" : "on"})`;
     const OPT_REASONING = `Reasoning: ${reasoning ? "on" : "off"}  (tap to turn ${reasoning ? "off" : "on"})`;
+    const OPT_CACHE = `Anthropic cache: ${cacheState}${cacheManual ? " (manual)" : ""}  (tap to cycle auto → on → off)`;
     const OPT_CONTEXT = `Max context: ${formatK(effectiveContextWindow(current))}${ctxManual ? " (manual)" : ""}  (tap to change)`;
     const OPT_MAX = `Max output: ${formatK(effectiveMaxTokens(current))}${maxManual ? " (manual)" : ""}  (tap to change)`;
     const OPT_TEMP = `Temperature: ${temp ?? "server default"}  (tap to change)`;
@@ -523,7 +557,7 @@ async function editModelCapabilities(
 
     const picked = await ctx.ui.select(
       `${current.name} - manual overrides\nAll manual values persist across ↺ Refresh; clear one here to return to the server-reported value.`,
-      [OPT_VISION, OPT_REASONING, OPT_CONTEXT, OPT_MAX, OPT_TEMP, OPT_DONE],
+      [OPT_VISION, OPT_REASONING, OPT_CACHE, OPT_CONTEXT, OPT_MAX, OPT_TEMP, OPT_DONE],
     );
     if (!picked || picked === OPT_DONE) break;
 
@@ -602,6 +636,17 @@ async function editModelCapabilities(
       if (m.id !== modelId) return m;
       if (picked === OPT_VISION) return setVisionOverride(m, !vision);
       if (picked === OPT_REASONING) return setReasoningOverride(m, !reasoning);
+      if (picked === OPT_CACHE) {
+        // auto → on → off → auto; "auto" deletes the override.
+        const next =
+          current.cacheFormatOverride === undefined
+            ? ("anthropic" as const)
+            : current.cacheFormatOverride === "anthropic"
+              ? null
+              : undefined;
+        const { cacheFormatOverride: _drop, ...rest } = m;
+        return next === undefined ? rest : { ...rest, cacheFormatOverride: next };
+      }
       if (picked === OPT_CONTEXT) {
         if (clearCtxOverride) {
           const { contextWindowOverride: _drop, ...rest } = m;
@@ -637,9 +682,51 @@ async function editModelCapabilities(
 
 const OPT_REFRESH = "↺ Refresh model list from server";
 const OPT_CAPS    = "✎ Edit model capabilities (vision / reasoning / context / max output / temperature)";
+// Bulk action: one menu entry cycling all keyword-matching models of the
+// server on → off → auto. Never stored on the server — the cycle position
+// is derived from the models' overrides.
+const OPT_CACHE_BULK = "⚡ Anthropic cache: cycle all Claude-family models (on → off → auto)";
+
+// Any forced-on → next is off; any forced-off → next is auto; else on.
+export function nextBulkCachePreset(models: LLMModel[]): "on" | "off" | "auto" {
+  const matching = models.filter((m) => detectCacheFormat(m.id));
+  if (matching.some((m) => m.cacheFormatOverride === "anthropic")) return "off";
+  if (matching.some((m) => m.cacheFormatOverride === null)) return "auto";
+  return "on";
+}
 const OPT_EDIT    = "✎ Reconfigure (name / URL / key)";
 const OPT_REMOVE  = "✕ Remove this server";
 const OPT_BACK    = "← Back";
+
+// Only keyword-matching models are touched; overrides on other models belong
+// to their own per-model toggle.
+async function applyBulkCacheFormat(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  server: LLMServer,
+  preset: "on" | "off" | "auto",
+): Promise<void> {
+  const s = readSettings();
+  const sv = s.servers.find((sv) => sv.id === server.id);
+  if (!sv) return;
+  let count = 0;
+  sv.models = sv.models.map((m) => {
+    if (!detectCacheFormat(m.id)) return m;
+    count += 1;
+    const { cacheFormatOverride: _drop, ...rest } = m;
+    if (preset === "auto") return rest;
+    return { ...rest, cacheFormatOverride: preset === "on" ? ("anthropic" as const) : null };
+  });
+  writeSettings(s);
+  unregisterServer(pi, server);
+  registerServer(pi, sv);
+  ctx.ui.notify(
+    count > 0
+      ? `Anthropic cache set to ${preset} for ${count} model(s) on ${server.name}.`
+      : `No Claude-family models on ${server.name} to change.`,
+    "info",
+  );
+}
 
 async function showServerMenu(
   pi: ExtensionAPI,
@@ -656,12 +743,19 @@ async function showServerMenu(
         : server.models.map(formatModelLine).join("\n");
     const backend = apiTypeLabel(server.apiType);
 
+    const matched = server.models.filter((m) => detectCacheFormat(m.id)).length;
+
     const picked = await ctx.ui.select(
       `${server.name}  [${backend}]\nURL: ${server.baseUrl}\n${modelsHeading(server.models)}\n${modelSummary}`,
-      [OPT_REFRESH, ...(server.models.length > 0 ? [OPT_CAPS] : []), OPT_EDIT, OPT_REMOVE, OPT_BACK],
+      [OPT_REFRESH, ...(server.models.length > 0 ? [OPT_CAPS, ...(matched ? [`${OPT_CACHE_BULK} (${matched} matching)`] : [])] : []), OPT_EDIT, OPT_REMOVE, OPT_BACK],
     );
 
     if (!picked || picked === OPT_BACK) return;
+
+    if (picked.startsWith(OPT_CACHE_BULK)) {
+      await applyBulkCacheFormat(pi, ctx, server, nextBulkCachePreset(server.models));
+      continue;
+    }
 
     if (picked === OPT_REFRESH) {
       ctx.ui.notify(`Refreshing ${server.name} ...`, "info");

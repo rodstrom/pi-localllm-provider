@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  ANTHROPIC_CACHE_KEYWORDS,
+  detectCacheFormat,
   detectLlamaCpp,
   detectLmStudio,
   detectModels,
@@ -1501,5 +1503,25 @@ describe("ninfer through the chain", () => {
     const result = await detectModels("http://x/v1", "");
     expect(result.models[0].reasoning).toBe(false);
     expect(result.models[0].thinkingLevelMap).toBeUndefined();
+  });
+});
+
+describe("detectCacheFormat", () => {
+  it("matches every Claude family keyword", () => {
+    for (const kw of ANTHROPIC_CACHE_KEYWORDS) {
+      expect(detectCacheFormat(`gateway/${kw}-1`), `keyword ${kw}`).toBe(true);
+    }
+    expect(detectCacheFormat("aws/claude-haiku-5-5-eu")).toBe(true);
+  });
+
+  it("is case-insensitive", () => {
+    expect(detectCacheFormat("CLAUDE-SONNET-4-5")).toBe(true);
+    expect(detectCacheFormat("Anthropic/Opus")).toBe(true);
+  });
+
+  it("does not match local model ids", () => {
+    expect(detectCacheFormat("greenpt/deepseek-v4.1-flash")).toBe(false);
+    expect(detectCacheFormat("qwen3.8-30b-a3b")).toBe(false);
+    expect(detectCacheFormat("gpt-oss-20b")).toBe(false);
   });
 });

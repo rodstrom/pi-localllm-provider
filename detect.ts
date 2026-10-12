@@ -164,6 +164,33 @@ export function capTokens(contextWindow: number, reasoning = false): number {
   return Math.min(Math.floor(contextWindow / 2), reasoning ? 65536 : 8192);
 }
 
+// ─── Anthropic prompt-caching detection ─────────────────────────────
+// Model ids that look like Anthropic's Claude family. Case-insensitive
+// substring match against the id: the list covers the vendor prefix
+// ("anthropic/..." on gateways that qualify it) plus the model codenames,
+// since most gateways serve them unqualified ("claude-sonnet-4-5").
+// Shared by detection and the tests.
+export const ANTHROPIC_CACHE_KEYWORDS = [
+  "anthropic",
+  "claude",
+  "haiku",
+  "sonnet",
+  "opus",
+  "fable",
+  "mythos",
+] as const;
+
+/**
+ * Whether a model id names a Claude-family model, i.e. one an
+ * OpenAI-compatible gateway fronts with Anthropic's inference stack —
+ * the only models where a `cache_control` marker in the request body
+ * does anything.
+ */
+export function detectCacheFormat(modelId: string): boolean {
+  const id = modelId.toLowerCase();
+  return ANTHROPIC_CACHE_KEYWORDS.some((kw) => id.includes(kw));
+}
+
 // ─── MTPLX ──────────────────────────────────────────────────────────
 // No /v1/models/status or /api/v1/models — only a single active model,
 // described richly by /health (context_window, max_response_tokens,
